@@ -1,16 +1,21 @@
 <?php
+namespace Adminer;
+
 $status = isset($_GET["status"]);
 page_header($status ? lang('Status') : lang('Variables'));
 
-$variables = ($status ? show_status() : show_variables());
+$variables = ($status ? adminer()->showStatus() : adminer()->showVariables());
 if (!$variables) {
 	echo "<p class='message'>" . lang('No rows.') . "\n";
 } else {
-	echo "<table cellspacing='0'>\n";
-	foreach ($variables as $key => $val) {
+	echo "<table>\n";
+	foreach ($variables as $row) {
 		echo "<tr>";
-		echo "<th><code class='jush-" . $jush . ($status ? "status" : "set") . "'>" . h($key) . "</code>";
-		echo "<td>" . h($val);
+		$key = array_shift($row);
+		echo "<th><code class='jush-" . JUSH . ($status ? "status" : "set") . "'>" . h($key) . "</code>";
+		foreach ($row as $val) {
+			echo "<td>" . nl_br(h($val));
+		}
 	}
 	echo "</table>\n";
 }

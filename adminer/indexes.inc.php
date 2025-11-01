@@ -1,7 +1,10 @@
 <?php
+namespace Adminer;
+
 $TABLE = $_GET["indexes"];
 $index_types = array("PRIMARY", "UNIQUE", "INDEX");
-$table_status = table_status($TABLE, true);
+$table_status = table_status1($TABLE, true);
+$index_algorithms = driver()->indexAlgorithms($table_status);
 if (preg_match('~MyISAM|M?aria' . (min_version(5.6, '10.0.5') ? '|InnoDB' : '') . '~i', $table_status["Engine"])) {
 	$index_types[] = "FULLTEXT";
 }
@@ -9,14 +12,17 @@ if (preg_match('~MyISAM|M?aria' . (min_version(5.7, '10.2.2') ? '|InnoDB' : '') 
 	$index_types[] = "SPATIAL";
 }
 $indexes = indexes($TABLE);
+$fields = fields($TABLE);
 $primary = array();
-if ($jush == "mongo") { // doesn't support primary key
+if (JUSH == "mongo") { // doesn't support primary key
 	$primary = $indexes["_id_"];
 	unset($index_types[0]);
 	unset($indexes["_id_"]);
 }
 $row = $_POST;
-
+if ($row) {
+	save_settings(array("index_options" => $row["options"]));
+}
 if ($_POST && !$error && !$_POST["add"] && !$_POST["drop_col"]) {
 	$alter = array();
 	foreach ($row["indexes"] as $index) {
@@ -25,36 +31,41 @@ if ($_POST && !$error && !$_POST["add"] && !$_POST["drop_col"]) {
 			$columns = array();
 			$lengths = array();
 			$descs = array();
+			$index_condition = (support("partial_indexes") ? $index["partial"] : "");
+			$index_algorithm = (in_array($index["algorithm"], $index_algorithms) ? $index["algorithm"] : "");
 			$set = array();
 			ksort($index["columns"]);
 			foreach ($index["columns"] as $key => $column) {
 				if ($column != "") {
-					$length = $index["lengths"][$key];
-					$desc = $index["descs"][$key];
-					$set[] = idf_escape($column) . ($length ? "(" . (+$length) . ")" : "") . ($desc ? " DESC" : "");
+					$length = idx($index["lengths"], $key);
+					$desc = idx($index["descs"], $key);
+					$set[] = ($fields[$column] ? idf_escape($column) : $column) . ($length ? "(" . (+$length) . ")" : "") . ($desc ? " DESC" : "");
 					$columns[] = $column;
-					$lengths[] = ($length ? $length : null);
+					$lengths[] = ($length ?: null);
 					$descs[] = $desc;
 				}
 			}
 
-			if ($columns) {
-				$existing = $indexes[$name];
-				if ($existing) {
-					ksort($existing["columns"]);
-					ksort($existing["lengths"]);
-					ksort($existing["descs"]);
-					if ($index["type"] == $existing["type"]
-						&& array_values($existing["columns"]) === $columns
-						&& (!$existing["lengths"] || array_values($existing["lengths"]) === $lengths)
-						&& array_values($existing["descs"]) === $descs
-					) {
-						// skip existing index
-						unset($indexes[$name]);
-						continue;
-					}
+			$existing = $indexes[$name];
+			if ($existing) {
+				ksort($existing["columns"]);
+				ksort($existing["lengths"]);
+				ksort($existing["descs"]);
+				if (
+					$index["type"] == $existing["type"]
+					&& array_values($existing["columns"]) === $columns
+					&& (!$existing["lengths"] || array_values($existing["lengths"]) === $lengths)
+					&& array_values($existing["descs"]) === $descs
+					&& $existing["partial"] == $index_condition
+					&& (!$index_algorithms || $existing["algorithm"] == $index_algorithm)
+				) {
+					// skip existing index
+					unset($indexes[$name]);
+					continue;
 				}
-				$alter[] = array($index["type"], $name, $set);
+			}
+			if ($columns) {
+				$alter[] = array($index["type"], $name, $set, $index_algorithm, $index_condition);
 			}
 		}
 	}
@@ -71,7 +82,7 @@ if ($_POST && !$error && !$_POST["add"] && !$_POST["drop_col"]) {
 
 page_header(lang('Indexes'), $error, array("table" => $TABLE), h($TABLE));
 
-$fields = array_keys(fields($TABLE));
+$fields_keys = array_keys($fields);
 if ($_POST["add"]) {
 	foreach ($row["indexes"] as $key => $index) {
 		if ($index["columns"][count($index["columns"])] != "") {
@@ -91,22 +102,44 @@ if (!$row) {
 	$indexes[] = array("columns" => array(1 => ""));
 	$row["indexes"] = $indexes;
 }
+$lengths = (JUSH == "sql" || JUSH == "mssql");
+$show_options = ($_POST ? $_POST["options"] : get_setting("index_options"));
 ?>
 
 <form action="" method="post">
 <div class="scrollable">
-<table cellspacing="0" class="nowrap">
+<table class="nowrap">
 <thead><tr>
 <th id="label-type"><?php echo lang('Index Type'); ?>
-<th><input type="submit" class="wayoff"><?php echo lang('Column (length)'); ?>
+<?php
+$idxopts = " class='idxopts" . ($show_options ? "" : " hidden") . "'";
+if ($index_algorithms) {
+	echo "<th id='label-algorithm'$idxopts>" . lang('Algorithm') . doc_link(array(
+		'sql' => 'create-index.html#create-index-storage-engine-index-types',
+		'mariadb' => 'storage-engine-index-types/',
+		'pgsql' => 'indexes-types.html',
+	));
+}
+?>
+<th><input type="submit" class="wayoff"><?php
+echo lang('Columns') . ($lengths ? "<span$idxopts> (" . lang('length') . ")</span>" : "");
+if ($lengths || support("descidx")) {
+	echo checkbox("options", 1, $show_options, lang('Options'), "indexOptionsShow(this.checked)", "jsonly") . "\n";
+}
+?>
 <th id="label-name"><?php echo lang('Name'); ?>
-<th><noscript><?php echo "<input type='image' class='icon' name='add[0]' src='../adminer/static/plus.gif' alt='+' title='" . lang('Add next') . "'>"; ?></noscript>
+<?php
+if (support("partial_indexes")) {
+	echo "<th id='label-condition'$idxopts>" . lang('Condition');
+}
+?>
+<th><noscript><?php echo icon("plus", "add[0]", "+", lang('Add next')); ?></noscript>
 </thead>
 <?php
 if ($primary) {
 	echo "<tr><td>PRIMARY<td>";
 	foreach ($primary["columns"] as $key => $column) {
-		echo select_input(" disabled", $fields, $column);
+		echo select_input(" disabled", $fields_keys, $column);
 		echo "<label><input disabled type='checkbox'>" . lang('descending') . "</label> ";
 	}
 	echo "<td><td>\n";
@@ -114,7 +147,11 @@ if ($primary) {
 $j = 1;
 foreach ($row["indexes"] as $index) {
 	if (!$_POST["drop_col"] || $j != key($_POST["drop_col"])) {
-		echo "<tr><td>" . html_select("indexes[$j][type]", array(-1 => "") + $index_types, $index["type"], ($j == count($row["indexes"]) ? "indexesAddRow.call(this);" : 1), "label-type");
+		echo "<tr><td>" . html_select("indexes[$j][type]", array(-1 => "") + $index_types, $index["type"], ($j == count($row["indexes"]) ? "indexesAddRow.call(this);" : ""), "label-type");
+
+		if ($index_algorithms) {
+			echo "<td$idxopts>" . html_select("indexes[$j][algorithm]", array_merge(array(""), $index_algorithms), $index['algorithm'], "label-algorithm");
+		}
 
 		echo "<td>";
 		ksort($index["columns"]);
@@ -122,18 +159,22 @@ foreach ($row["indexes"] as $index) {
 		foreach ($index["columns"] as $key => $column) {
 			echo "<span>" . select_input(
 				" name='indexes[$j][columns][$i]' title='" . lang('Column') . "'",
-				($fields ? array_combine($fields, $fields) : $fields),
+				($fields && ($column == "" || $fields[$column]) ? array_combine($fields_keys, $fields_keys) : array()),
 				$column,
-				"partial(" . ($i == count($index["columns"]) ? "indexesAddColumn" : "indexesChangeColumn") . ", '" . js_escape($jush == "sql" ? "" : $_GET["indexes"] . "_") . "')"
+				"partial(" . ($i == count($index["columns"]) ? "indexesAddColumn" : "indexesChangeColumn") . ", '" . js_escape(JUSH == "sql" ? "" : $_GET["indexes"] . "_") . "')"
 			);
-			echo ($jush == "sql" || $jush == "mssql" ? "<input type='number' name='indexes[$j][lengths][$i]' class='size' value='" . h($index["lengths"][$key]) . "' title='" . lang('Length') . "'>" : "");
-			echo (support("descidx") ? checkbox("indexes[$j][descs][$i]", 1, $index["descs"][$key], lang('descending')) : "");
-			echo " </span>";
+			echo "<span$idxopts>";
+			echo ($lengths ? "<input type='number' name='indexes[$j][lengths][$i]' class='size' value='" . h(idx($index["lengths"], $key)) . "' title='" . lang('Length') . "'>" : "");
+			echo (support("descidx") ? checkbox("indexes[$j][descs][$i]", 1, idx($index["descs"], $key), lang('descending')) : "");
+			echo "</span> </span>";
 			$i++;
 		}
 
 		echo "<td><input name='indexes[$j][name]' value='" . h($index["name"]) . "' autocapitalize='off' aria-labelledby='label-name'>\n";
-		echo "<td><input type='image' class='icon' name='drop_col[$j]' src='../adminer/static/cross.gif' alt='x' title='" . lang('Remove') . "'>" . script("qsl('input').onclick = partial(editingRemoveRow, 'indexes\$1[type]');");
+		if (support("partial_indexes")) {
+			echo "<td$idxopts><input name='indexes[$j][partial]' value='" . h($index["partial"]) . "' autocapitalize='off' aria-labelledby='label-condition'>\n";
+		}
+		echo "<td>" . icon("cross", "drop_col[$j]", "x", lang('Remove')) . script("qsl('button').onclick = partial(editingRemoveRow, 'indexes\$1[type]');");
 	}
 	$j++;
 }
@@ -142,5 +183,5 @@ foreach ($row["indexes"] as $index) {
 </div>
 <p>
 <input type="submit" value="<?php echo lang('Save'); ?>">
-<input type="hidden" name="token" value="<?php echo $token; ?>">
+<?php echo input_token(); ?>
 </form>
